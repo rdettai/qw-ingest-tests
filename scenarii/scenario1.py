@@ -3,6 +3,8 @@ import numpy as np
 import requests
 import threading
 import time
+import re
+from collections import Counter
 
 index_id = "test_index"
 
@@ -39,49 +41,6 @@ indexing_settings:
     print(f"Index {index_id} created")
 
 
-def ingest_documents(url: str):
-    documents = [
-        {
-            "timestamp": int(time.time()),
-            "id": "1",
-            "content": "This is a test document.",
-        },
-        {"timestamp": int(time.time()), "id": "2", "content": "Another test document."},
-    ] * 10000
-    ndjson = "\n".join(json.dumps(doc) for doc in documents)
-    start = time.time()
-    ingest_rate_mibps = 40
-    ingest_total_mib = 2000
-    target_request_interval = len(ndjson) / (ingest_rate_mibps * 1024 * 1024)
-    status_codes = {200: 0, 429: 0}
-    request_durations = []
-    # print("(status, time, mb)")
-    for i in range(int(ingest_total_mib * 1024 * 1024 / len(ndjson))):
-        # print(f"Ingesting {len(documents)} docs ({len(ndjson)} bytes) into index {index_id}...")
-        def make_request(idx):
-            req_start = time.time()
-            response = requests.post(f"{url}/api/v1/{index_id}/ingest", data=ndjson)
-            # print(
-            #     (response.status_code, time.time() - start, len(ndjson) * idx / 1000000)
-            # )
-            status_codes[response.status_code] += 1
-            request_durations.append(time.time() - req_start)
-
-        request_thread = threading.Thread(target=make_request, args=(i,))
-        request_thread.start()
-        time.sleep(target_request_interval)
-    request_thread.join()
-
-    print(f"Effective ingest rate: {ingest_total_mib/(time.time()-start):.2f} MiB/s")
-
-    print(f"status codes: {status_codes}")
-    print(f"request durations: {status_codes}")
-    print(f"  p50: {np.percentile(request_durations, 50):.2f}s")
-    print(f"  p90: {np.percentile(request_durations, 90):.2f}s")
-    print(f"  p99: {np.percentile(request_durations, 99):.2f}s")
-    print(f"  max: {np.max(request_durations):.2f}s")
-
-
 class LogResults:
     def __init__(self):
         self.start_time = time.time()
@@ -99,12 +58,35 @@ class LogResults:
             self.error_count += 1
         if "lock acquisition took" in line:
             self.slow_lock += 1
-        elif "successfully scaled up number of shards to " in line:
+        elif "successfully scaled up number of shards to" in line:
             # print(line)
-            self.shard_scale_up.append(time.time() - self.start_time)
+            match = re.search(r"successfully scaled up number of shards to (\d+)", line)
+            if match:
+                nb_shard = int(match.group(1))
+                self.shard_scale_up.append((nb_shard, time.time() - self.start_time))
+            else:
+                raise Exception(
+                    f"Failed to parse number of shards after scale up: {line}"
+                )
+
         elif "shards into routing table" in line:
             # print(line)
-            self.router_scale_up.append(time.time() - self.start_time)
+            match = re.search(r"inserted (\d+) shards into routing table", line)
+            if match:
+                shards_added = int(match.group(1))
+                self.router_scale_up.append(
+                    (shards_added, time.time() - self.start_time)
+                )
+            else:
+                raise Exception(
+                    f"Failed to parse number of shards added to router: {line}"
+                )
+
+    def shards_in_router(self) -> int:
+        result = 1
+        for shards_added, _ in self.router_scale_up:
+            result += shards_added
+        return result
 
     def print(self):
         if self.log_file is not None:
@@ -114,3 +96,49 @@ class LogResults:
         print(f"slow_lock: {self.slow_lock}")
         print(f"shard_scale_up: {self.shard_scale_up}")
         print(f"router_scale_up: {self.router_scale_up}")
+
+
+def ingest_documents(url: str, log_results: LogResults):
+    documents = [
+        {
+            "timestamp": int(time.time()),
+            "id": "1",
+            "content": "This is a test document.",
+        },
+        {"timestamp": int(time.time()), "id": "2", "content": "Another test document."},
+    ] * 10000
+    ndjson = "\n".join(json.dumps(doc) for doc in documents)
+    start = time.time()
+    ingest_rate_mibps = 40
+    ingest_total_mib = 2000
+    target_request_interval = len(ndjson) / (ingest_rate_mibps * 1024 * 1024)
+    status_codes = []
+    request_durations = []
+    # print("(status, time, mb)")
+    for i in range(int(ingest_total_mib * 1024 * 1024 / len(ndjson))):
+        # print(f"Ingesting {len(documents)} docs ({len(ndjson)} bytes) into index {index_id}...")
+        def make_request(idx):
+            req_start = time.time()
+            response = requests.post(f"{url}/api/v1/{index_id}/ingest", data=ndjson)
+            # print(
+            #     (response.status_code, time.time() - start, len(ndjson) * idx / 1000000)
+            # )
+            status_codes.append((response.status_code, log_results.shards_in_router()))
+            request_durations.append(time.time() - req_start)
+
+        request_thread = threading.Thread(target=make_request, args=(i,))
+        request_thread.start()
+        time.sleep(target_request_interval)
+    request_thread.join()
+
+    print(f"Effective ingest rate: {ingest_total_mib/(time.time()-start):.2f} MiB/s")
+
+    print(f"status codes: {Counter([code for code, _ in status_codes])}")
+    print(
+        f"status codes by shard count: {Counter([(code, shards) for code, shards in status_codes if code != 200])}"
+    )
+    print(f"request durations:")
+    print(f"  p50: {np.percentile(request_durations, 50):.2f}s")
+    print(f"  p90: {np.percentile(request_durations, 90):.2f}s")
+    print(f"  p99: {np.percentile(request_durations, 99):.2f}s")
+    print(f"  max: {np.max(request_durations):.2f}s")

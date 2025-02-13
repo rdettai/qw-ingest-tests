@@ -129,7 +129,8 @@ indexer:
 #
 ingest_api:
   # shard_throughput_limit: 5MiB
-  shard_burst_limit: 100MiB
+  shard_burst_limit: 50MiB
+  shard_scale_up_factor: 1.5
   # max_queue_memory_usage: 2GiB
   # max_queue_disk_usage: 4GiB
   # content_length_limit: 10MiB

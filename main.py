@@ -51,16 +51,16 @@ def wait_quickwit_ready(url: str, timeout_sec: int, interval_sec: int):
         time.sleep(interval_sec)
 
 
-def monitor_stderr(process: subprocess.Popen, results: LogResults):
+def monitor_stderr(process: subprocess.Popen, log_results: LogResults):
     """Monitor the stderr output for lines containing 'warn' and count them."""
     warn_count = 0
     current_time = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     file_name = f"logs/{current_time}.log"
-    results.log_file = file_name
+    log_results.log_file = file_name
     with open(file_name, "w") as f:
         for line in iter(process.stdout.readline, ""):
             f.write(line)
-            results.on_new_log_line(line)
+            log_results.on_new_log_line(line)
     return warn_count
 
 
@@ -85,7 +85,7 @@ def main(binary_path, url):
 
         create_indexes(url)
 
-        ingest_documents(url)
+        ingest_documents(url, log_results)
     except Exception as e:
         print("An error occurred", e)
 
