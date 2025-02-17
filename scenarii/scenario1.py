@@ -110,7 +110,8 @@ def ingest_documents(url: str, log_results: LogResults):
     ndjson = "\n".join(json.dumps(doc) for doc in documents)
     start = time.time()
     ingest_rate_mibps = 40
-    ingest_total_mib = 2000
+    # run for 100 seconds
+    ingest_total_mib = ingest_rate_mibps * 100
     target_request_interval = len(ndjson) / (ingest_rate_mibps * 1024 * 1024)
     status_codes = []
     request_durations = []
